@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Daily from '@daily-co/daily-js';
-import { Phone, PhoneOff, Mic, MicOff, Users, Copy, Check, Mail, MessageCircle } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Users, Copy, Check, Mail, MessageCircle, FileText, AlertTriangle } from 'lucide-react';
 
 type CallState = 'idle' | 'creating' | 'joining' | 'joined' | 'leaving' | 'error';
 
@@ -25,6 +25,22 @@ interface AudioTestState {
   testPassed: boolean;
   speakerTestResult: 'none' | 'playing' | 'success' | 'failed';
   speakerVolume: number;
+}
+
+interface TranscriptEntry {
+  id: string;
+  timestamp: Date;
+  speaker: 'local' | 'remote';
+  text: string;
+  confidence: number;
+  isInterim: boolean;
+}
+
+interface SpeechRecognitionState {
+  isEnabled: boolean;
+  isListening: boolean;
+  transcript: TranscriptEntry[];
+  error: string | null;
 }
 
 function App() {
@@ -59,10 +75,22 @@ function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
+  const [speechRecognition, setSpeechRecognition] = useState<SpeechRecognitionState>({
+    isEnabled: false,
+    isListening: false,
+    transcript: [],
+    error: null
+  });
+  const localRecognitionRef = useRef<any>(null);
+  const remoteRecognitionRef = useRef<any>(null);
+  const remoteAudioStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     // Load available audio devices
     loadAudioDevices();
+    
+    // Check speech recognition support
+    checkSpeechRecognitionSupport();
     
     // Cleanup on unmount
     return () => {
@@ -70,6 +98,7 @@ function App() {
         callObjectRef.current.destroy();
       }
       stopAudioTest();
+      stopSpeechRecognition();
     };
   }, []);
 
