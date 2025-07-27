@@ -4,8 +4,8 @@ import { Phone, PhoneOff, Mic, MicOff, Users, Copy, Check, Mail, MessageCircle }
 
 type CallState = 'idle' | 'creating' | 'joining' | 'joined' | 'leaving' | 'error';
 
-const DAILY_API_KEY = '62a4c2e754bc168c3a6130276d7dd0b1e95c8efb48a1fcc2e4eeadc25c362ee2';
-const DAILY_API_BASE_URL = 'https://api.daily.co/v1';
+const DAILY_API_KEY = import.meta.env.VITE_DAILY_API_KEY || '62a4c2e754bc168c3a6130276d7dd0b1e95c8efb48a1fcc2e4eeadc25c362ee2';
+const DAILY_API_BASE_URL = import.meta.env.VITE_DAILY_API_BASE_URL || 'https://api.daily.co/v1';
 
 interface CallStatus {
   state: CallState;
