@@ -83,6 +83,74 @@ function App() {
     };
   }, []);
 
+  // ── downsampleBuffer ───────────────────────────────────────
+// take a Float32Array @ sampleRate and resample it to outRate (16 kHz)
+  function downsampleBuffer(
+    buffer: Float32Array,
+    sampleRate: number,
+    outRate = 16000
+  ): Float32Array {
+    if (outRate === sampleRate) return buffer;
+    const ratio = sampleRate / outRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < newLength) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+      let sum = 0, count = 0;
+      for (
+        let i = offsetBuffer;
+        i < nextOffsetBuffer && i < buffer.length;
+        i++
+      ) {
+        sum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = sum / count;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function startRecorder(stream: MediaStream, ws: WebSocket) {
+  // 1) build Web Audio graph
+  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+  const audioContext = new AudioCtx();
+  const source = audioContext.createMediaStreamSource(stream);
+  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+  source.connect(processor);
+  processor.connect(audioContext.destination);
+
+  // 2) on each audio callback, downsample → Int16 → base64 → send
+  processor.onaudioprocess = (event) => {
+    // raw float32 PCM [-1…1]
+    const floatData = event.inputBuffer.getChannelData(0);
+    // down to 16 kHz
+    const down = downsampleBuffer(
+      floatData,
+      audioContext.sampleRate,
+      16000
+    );
+    // convert to 16‑bit signed
+    const int16 = new Int16Array(down.length);
+    for (let i = 0; i < down.length; i++) {
+      const s = Math.max(-1, Math.min(1, down[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    // bytes → base64
+    const bytes = new Uint8Array(int16.buffer);
+    const b64 = btoa(String.fromCharCode(...bytes));
+    if (ws.readyState === WebSocket.OPEN) {
+  ws.send(JSON.stringify({ payload: b64, ts: Date.now()/1000 }));
+    }
+
+  };
+}
+
+
   const loadAudioDevices = async () => {
     try {
       // Request permissions first
@@ -453,71 +521,53 @@ function App() {
             message: 'Connected',
             participantCount: Object.keys(event.participants).length
           });
+          //
+          //
+          //
+          //
+          //
+          //
+          //
+          //
 
           /* === Anti‑Scam socket & recording  ========================= */
-          if (!scamSocketRef.current) {
-            const ws = openScamWs();               // native WS
-            scamSocketRef.current = ws;
+if (!scamSocketRef.current) {
+  // ── 1. connect raw WebSocket ──────────────────────────────
+  const ws = openScamWs();                     // native WS
+  scamSocketRef.current = ws;
 
-            ws.onopen = () => console.log("🟢 Scam WS connected");
-            ws.onmessage = (ev) => {
-              const msg = JSON.parse(ev.data) as ScoreMsg | ScamMsg;
-              if (msg.type === "score") {
-                console.log(
-                  `Whisper: «${msg.text}»  score=${msg.score.toFixed(2)}`
-                );
-              }
-              if (msg.type === "scam_detected") {
-                alert("⚠️ Potential scam detected – the call will end.");
-                leaveCall();
-              }
-            };
+  ws.onopen = () => {
+  console.log("🟢  Scam WS connected");
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    .then(micStream => startRecorder(micStream, ws))
+    .catch(err => console.error("Could not get mic for scam‑guard:", err));
+  };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data) as ScoreMsg | ScamMsg;
+    if (msg.type === "score") {
+      console.log(`Whisper: «${msg.text}»  score=${msg.score.toFixed(2)}`);
+    }
+    if (msg.type === "scam_detected") {
+      alert("⚠️  Potential scam detected – the call will end.");
+      leaveCall();
+    }
+  };
 
-            /* -------- capture mixed remote audio ---------- */
-            const remoteEl  = callObject.remoteAudio();               // <audio>
-            const remoteMix = remoteEl?.srcObject as MediaStream | null;
-            if (!remoteMix) {
-              console.warn("Remote mix not ready yet – will retry on first track‑started");
-            } else {
-              startRecorder(remoteMix, ws);
-            }
 
-            // if remoteMix wasn't ready at this point, start it as soon as
-            // the first remote audio track starts:
-            callObject.on("track-started", (ev) => {
-              if (
-                ev.track.kind === "audio" &&
-                !recorderRef.current &&
-                ev.participant &&
-                !ev.participant.local
-              ) {
-                const mix = (callObject.remoteAudio().srcObject ||
-                            new MediaStream([ev.track])) as MediaStream;
-                startRecorder(mix, ws);
-              }
-            });
-          }
-
-          function startRecorder(stream: MediaStream, ws: WebSocket) {
-            const rec = new MediaRecorder(stream, {
-              mimeType: "audio/webm;codecs=opus",
-            });
-            recorderRef.current = rec;
-
-            rec.onstart = () => console.log("🔴 MediaRecorder started");
-            rec.ondataavailable = async (ev) => {
-              console.log("📦 slice", ev.data.size, "bytes");
-              const buf = await ev.data.arrayBuffer();
-              const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-              ws.send(JSON.stringify({ payload: b64, ts: Date.now() / 1000 }));
-            };
-            rec.onerror = (e) => console.error("Recorder error", e);
-            rec.start(1900);
-          }
-          /* === end anti‑scam block ================================== */
+}
 
 
 
+/* === end anti‑scam block ================================== */
+
+
+          //
+          //
+          //
+          //
+          //
+          //
+          ///////
           
           // Force enable audio after joining
           setTimeout(async () => {
@@ -586,12 +636,9 @@ function App() {
           }
         })
         .on('track-started', (event) => {
-          console.log('Track started:', event);
-          if (event.track && event.track.kind === 'audio') {
-            console.log('Remote audio track started:', event.track);
-            console.log('Track enabled:', event.track.enabled);
-            console.log('Track muted:', event.track.muted);
-            console.log('Track readyState:', event.track.readyState);
+          if (event.track.kind === 'audio' && scamSocketRef.current) {
+                  const stream = new MediaStream([event.track]);
+                  startRecorder(stream, scamSocketRef.current);
             
             // Force play the audio track
             if (event.participant && !event.participant.local) {
