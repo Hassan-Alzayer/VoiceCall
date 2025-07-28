@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Daily from '@daily-co/daily-js';
 import { Phone, PhoneOff, Mic, MicOff, Users, Copy, Check, Mail, MessageCircle } from 'lucide-react';
-
+import { openScamWs, ScoreMsg, ScamMsg } from "./scamSocket";
 type CallState = 'idle' | 'creating' | 'joining' | 'joined' | 'leaving' | 'error';
 
 const DAILY_API_KEY = import.meta.env.VITE_DAILY_API_KEY || '62a4c2e754bc168c3a6130276d7dd0b1e95c8efb48a1fcc2e4eeadc25c362ee2';
@@ -59,7 +59,8 @@ function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
-
+  const scamSocketRef = useRef<ReturnType<typeof openScamWs> | null>(null);
+  const recorderRef   = useRef<MediaRecorder | null>(null);
   useEffect(() => {
     // Load available audio devices
     loadAudioDevices();
@@ -70,6 +71,15 @@ function App() {
         callObjectRef.current.destroy();
       }
       stopAudioTest();
+
+      if (recorderRef.current) {
+        recorderRef.current.stop();
+        recorderRef.current = null;
+      }
+      if (scamSocketRef.current) {
+        scamSocketRef.current.disconnect();
+        scamSocketRef.current = null;
+      }
     };
   }, []);
 
@@ -443,6 +453,71 @@ function App() {
             message: 'Connected',
             participantCount: Object.keys(event.participants).length
           });
+
+          /* === Anti‑Scam socket & recording  ========================= */
+          if (!scamSocketRef.current) {
+            const ws = openScamWs();               // native WS
+            scamSocketRef.current = ws;
+
+            ws.onopen = () => console.log("🟢 Scam WS connected");
+            ws.onmessage = (ev) => {
+              const msg = JSON.parse(ev.data) as ScoreMsg | ScamMsg;
+              if (msg.type === "score") {
+                console.log(
+                  `Whisper: «${msg.text}»  score=${msg.score.toFixed(2)}`
+                );
+              }
+              if (msg.type === "scam_detected") {
+                alert("⚠️ Potential scam detected – the call will end.");
+                leaveCall();
+              }
+            };
+
+            /* -------- capture mixed remote audio ---------- */
+            const remoteEl  = callObject.remoteAudio();               // <audio>
+            const remoteMix = remoteEl?.srcObject as MediaStream | null;
+            if (!remoteMix) {
+              console.warn("Remote mix not ready yet – will retry on first track‑started");
+            } else {
+              startRecorder(remoteMix, ws);
+            }
+
+            // if remoteMix wasn't ready at this point, start it as soon as
+            // the first remote audio track starts:
+            callObject.on("track-started", (ev) => {
+              if (
+                ev.track.kind === "audio" &&
+                !recorderRef.current &&
+                ev.participant &&
+                !ev.participant.local
+              ) {
+                const mix = (callObject.remoteAudio().srcObject ||
+                            new MediaStream([ev.track])) as MediaStream;
+                startRecorder(mix, ws);
+              }
+            });
+          }
+
+          function startRecorder(stream: MediaStream, ws: WebSocket) {
+            const rec = new MediaRecorder(stream, {
+              mimeType: "audio/webm;codecs=opus",
+            });
+            recorderRef.current = rec;
+
+            rec.onstart = () => console.log("🔴 MediaRecorder started");
+            rec.ondataavailable = async (ev) => {
+              console.log("📦 slice", ev.data.size, "bytes");
+              const buf = await ev.data.arrayBuffer();
+              const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+              ws.send(JSON.stringify({ payload: b64, ts: Date.now() / 1000 }));
+            };
+            rec.onerror = (e) => console.error("Recorder error", e);
+            rec.start(1900);
+          }
+          /* === end anti‑scam block ================================== */
+
+
+
           
           // Force enable audio after joining
           setTimeout(async () => {
@@ -650,6 +725,14 @@ function App() {
   };
 
   const leaveCall = async () => {
+    if (recorderRef.current) {
+      recorderRef.current.stop();
+      recorderRef.current = null;
+    }
+    if (scamSocketRef.current) {
+      scamSocketRef.current.disconnect();
+      scamSocketRef.current = null;
+    }
     try {
       setCallStatus({ state: 'leaving', message: 'Disconnecting...' });
       
