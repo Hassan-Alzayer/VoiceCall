@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Daily from '@daily-co/daily-js';
 import { Phone, PhoneOff, Mic, MicOff, Users, Copy, Check, Mail, MessageCircle } from 'lucide-react';
-
+import { openScamWs, ScoreMsg, ScamMsg } from "./scamSocket";
 type CallState = 'idle' | 'creating' | 'joining' | 'joined' | 'leaving' | 'error';
 
 const DAILY_API_KEY = import.meta.env.VITE_DAILY_API_KEY || '62a4c2e754bc168c3a6130276d7dd0b1e95c8efb48a1fcc2e4eeadc25c362ee2';
@@ -59,7 +59,8 @@ function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
-
+  const scamSocketRef = useRef<ReturnType<typeof openScamWs> | null>(null);
+  const recorderRef   = useRef<MediaRecorder | null>(null);
   useEffect(() => {
     // Load available audio devices
     loadAudioDevices();
@@ -70,8 +71,85 @@ function App() {
         callObjectRef.current.destroy();
       }
       stopAudioTest();
+
+      if (recorderRef.current) {
+        recorderRef.current.stop();
+        recorderRef.current = null;
+      }
+      if (scamSocketRef.current) {
+        scamSocketRef.current.disconnect();
+        scamSocketRef.current = null;
+      }
     };
   }, []);
+
+  // ── downsampleBuffer ───────────────────────────────────────
+// take a Float32Array @ sampleRate and resample it to outRate (16 kHz)
+  function downsampleBuffer(
+    buffer: Float32Array,
+    sampleRate: number,
+    outRate = 16000
+  ): Float32Array {
+    if (outRate === sampleRate) return buffer;
+    const ratio = sampleRate / outRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < newLength) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+      let sum = 0, count = 0;
+      for (
+        let i = offsetBuffer;
+        i < nextOffsetBuffer && i < buffer.length;
+        i++
+      ) {
+        sum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = sum / count;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function startRecorder(stream: MediaStream, ws: WebSocket) {
+  // 1) build Web Audio graph
+  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+  const audioContext = new AudioCtx();
+  const source = audioContext.createMediaStreamSource(stream);
+  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+  source.connect(processor);
+  processor.connect(audioContext.destination);
+
+  // 2) on each audio callback, downsample → Int16 → base64 → send
+  processor.onaudioprocess = (event) => {
+    // raw float32 PCM [-1…1]
+    const floatData = event.inputBuffer.getChannelData(0);
+    // down to 16 kHz
+    const down = downsampleBuffer(
+      floatData,
+      audioContext.sampleRate,
+      16000
+    );
+    // convert to 16‑bit signed
+    const int16 = new Int16Array(down.length);
+    for (let i = 0; i < down.length; i++) {
+      const s = Math.max(-1, Math.min(1, down[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    // bytes → base64
+    const bytes = new Uint8Array(int16.buffer);
+    const b64 = btoa(String.fromCharCode(...bytes));
+    if (ws.readyState === WebSocket.OPEN) {
+  ws.send(JSON.stringify({ payload: b64, ts: Date.now()/1000 }));
+    }
+
+  };
+}
+
 
   const loadAudioDevices = async () => {
     try {
@@ -443,6 +521,53 @@ function App() {
             message: 'Connected',
             participantCount: Object.keys(event.participants).length
           });
+          //
+          //
+          //
+          //
+          //
+          //
+          //
+          //
+
+          /* === Anti‑Scam socket & recording  ========================= */
+if (!scamSocketRef.current) {
+  // ── 1. connect raw WebSocket ──────────────────────────────
+  const ws = openScamWs();                     // native WS
+  scamSocketRef.current = ws;
+
+  ws.onopen = () => {
+  console.log("🟢  Scam WS connected");
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    .then(micStream => startRecorder(micStream, ws))
+    .catch(err => console.error("Could not get mic for scam‑guard:", err));
+  };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data) as ScoreMsg | ScamMsg;
+    if (msg.type === "score") {
+      console.log(`Whisper: «${msg.text}»  score=${msg.score.toFixed(2)}`);
+    }
+    if (msg.type === "scam_detected") {
+      alert("⚠️  Potential scam detected – the call will end.");
+      leaveCall();
+    }
+  };
+
+
+}
+
+
+
+/* === end anti‑scam block ================================== */
+
+
+          //
+          //
+          //
+          //
+          //
+          //
+          ///////
           
           // Force enable audio after joining
           setTimeout(async () => {
@@ -511,12 +636,9 @@ function App() {
           }
         })
         .on('track-started', (event) => {
-          console.log('Track started:', event);
-          if (event.track && event.track.kind === 'audio') {
-            console.log('Remote audio track started:', event.track);
-            console.log('Track enabled:', event.track.enabled);
-            console.log('Track muted:', event.track.muted);
-            console.log('Track readyState:', event.track.readyState);
+          if (event.track.kind === 'audio' && scamSocketRef.current) {
+                  const stream = new MediaStream([event.track]);
+                  startRecorder(stream, scamSocketRef.current);
             
             // Force play the audio track
             if (event.participant && !event.participant.local) {
@@ -650,6 +772,14 @@ function App() {
   };
 
   const leaveCall = async () => {
+    if (recorderRef.current) {
+      recorderRef.current.stop();
+      recorderRef.current = null;
+    }
+    if (scamSocketRef.current) {
+      scamSocketRef.current.disconnect();
+      scamSocketRef.current = null;
+    }
     try {
       setCallStatus({ state: 'leaving', message: 'Disconnecting...' });
       
