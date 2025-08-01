@@ -1,6 +1,5 @@
 # Scam-Call Guard
 
-\
 
 **Scam-Call Guard** is a **Real-time Arabic scam-call detection micro-service and client UI**.
 This repository contains everything you need to reproduce our latest prototype:
