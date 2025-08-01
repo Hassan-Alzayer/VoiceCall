@@ -1,23 +1,42 @@
+/**
+ * App.tsx  (React + TypeScript, Vite)
+ * ===================================
+ * A **Daily.co**-powered audio-only calling UI with built-in microphone/speaker
+ * tests **and** a live anti-scam pipeline that streams raw audio to a
+ * Whisper-GPT-SVM backend (see `scamSocket.ts`).
+ *
+ *  - Create private rooms on the fly (`/rooms` Daily REST API).
+ *  - Join / leave existing rooms.
+ *  - Realtime mic-level + speaker playback diagnostics.
+ *  - Force-subscribe to every remote participant’s audio track.
+ *  - Streams **all** incoming / outgoing audio to the `/ws/audio` endpoint
+ *    for scam detection; hangs up automatically on detection.
+ *
+
+/* ────────────────────────────────────────────────────────────────────────── */
+
 import React, { useState, useEffect, useRef } from 'react';
 import Daily from '@daily-co/daily-js';
 import { Phone, PhoneOff, Mic, MicOff, Users, Copy, Check, Mail, MessageCircle } from 'lucide-react';
 import { openScamWs, ScoreMsg, ScamMsg } from "./scamSocket";
+/* ─── Types ──────────────────────────────────────────────────────────────── */
+/** Finite state-machine for the call lifecycle */
 type CallState = 'idle' | 'creating' | 'joining' | 'joined' | 'leaving' | 'error';
 
 const DAILY_API_KEY = import.meta.env.VITE_DAILY_API_KEY || '62a4c2e754bc168c3a6130276d7dd0b1e95c8efb48a1fcc2e4eeadc25c362ee2';
 const DAILY_API_BASE_URL = import.meta.env.VITE_DAILY_API_BASE_URL || 'https://api.daily.co/v1';
-
+/** UI-friendly representation of the current call status */
 interface CallStatus {
   state: CallState;
   message: string;
   participantCount?: number;
 }
-
+/** Object returned by Daily REST API when a room is created */
 interface RoomInfo {
   url: string;
   name: string;
 }
-
+/** Local audio test state (mic & speakers) */
 interface AudioTestState {
   isTestingMic: boolean;
   isTestingAudio: boolean;
@@ -27,7 +46,11 @@ interface AudioTestState {
   speakerVolume: number;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   MAIN REACT COMPONENT
+   ══════════════════════════════════════════════════════════════════════════ */
 function App() {
+    /* ─── React state & refs ──────────────────────────────────────────────── */
   const [contactName, setContactName] = useState('');
   const [roomUrl, setRoomUrl] = useState('');
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
@@ -38,6 +61,7 @@ function App() {
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  /* ── Available / selected I/O devices ────────────────────────────────── */
   const [availableDevices, setAvailableDevices] = useState<{
     microphones: MediaDeviceInfo[];
     speakers: MediaDeviceInfo[];
@@ -46,6 +70,7 @@ function App() {
     microphone: string;
     speaker: string;
   }>({ microphone: 'default', speaker: 'default' });
+  /* ── Local audio-test state ──────────────────────────────────────────── */
   const [audioTest, setAudioTest] = useState<AudioTestState>({
     isTestingMic: false,
     isTestingAudio: false,
@@ -55,12 +80,17 @@ function App() {
     speakerVolume: 50
   });
   const [microphoneBoost, setMicrophoneBoost] = useState(80);
+   /* ── Persistent/non-reactive handles ─────────────────────────────────── */
   const callObjectRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
+   // WebSocket to the anti-scam backend
   const scamSocketRef = useRef<ReturnType<typeof openScamWs> | null>(null);
+  // MediaRecorder used by scam-guard when we get remote tracks
   const recorderRef   = useRef<MediaRecorder | null>(null);
+
+   /* ─── Lifecycle: componentDidMount / unmount ─────────────────────────── */
   useEffect(() => {
     // Load available audio devices
     loadAudioDevices();
@@ -83,6 +113,21 @@ function App() {
     };
   }, []);
 
+  /* ══════════════════════════════════════════════════════════════════════
+     Audio helpers
+     ══════════════════════════════════════════════════════════════════════ */
+
+   /**
+   * Down-sample a **Float32** buffer from `sampleRate` → `outRate` (16 kHz
+   * by default). Whisper’s backend expects 16-kHz, 16-bit PCM.
+   *
+   * @param buffer      Input Float32Array
+   * @param sampleRate  Current sampling rate (Hz)
+   * @param outRate     Target rate, default = 16000 Hz
+   * @returns           Resampled Float32Array
+   */
+
+    
   // ── downsampleBuffer ───────────────────────────────────────
 // take a Float32Array @ sampleRate and resample it to outRate (16 kHz)
   function downsampleBuffer(
@@ -114,6 +159,22 @@ function App() {
     return result;
   }
 
+  
+
+  /**
+   * Start recording audio from the given MediaStream and send it to the
+   * WebSocket at /ws/audio as a series of base64-encoded 16-bit PCM
+   * chunks, with the timestamp of each chunk in seconds as "ts".
+   *
+   * The audio is downsampled from the input rate to 16 kHz before
+   * transmission.
+   *
+   * The WebSocket connection is expected to be open before calling this
+   * function; if it is not open, the function does nothing.
+   *
+   * @param stream  MediaStream to record from
+   * @param ws      WebSocket connection to send data to
+   */
   function startRecorder(stream: MediaStream, ws: WebSocket) {
   // 1) build Web Audio graph
   const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
@@ -151,6 +212,16 @@ function App() {
 }
 
 
+  /**
+   * Load audio devices and set default devices if none are selected
+   * 
+   * 1. Request audio permissions
+   * 2. Enumerate audio devices
+   * 3. Filter for microphones and speakers
+   * 4. Set available devices
+   * 5. Set default devices if none selected
+   * 6. Catch and log any errors
+   */
   const loadAudioDevices = async () => {
     try {
       // Request permissions first
@@ -174,12 +245,24 @@ function App() {
     }
   };
 
+  /**
+   * Generate a unique room name based on the contact's name and the current time
+   * @param {string} contactName - The name of the contact to generate a room name for
+   * @returns {string} - A unique room name in the format "call-<contact-name>-<random-id>-<timestamp>"
+   */
   const generateRoomName = (contactName: string): string => {
     const timestamp = Date.now();
     const randomId = Math.random().toString(36).substring(2, 8);
     return `call-${contactName.toLowerCase().replace(/[^a-z0-9]/g, '')}-${randomId}-${timestamp}`;
   };
 
+
+  /**
+   * Create a new Daily room via the REST API.
+   *
+   * @param contactName  Friendly name used in the UI.
+   * @returns            Full `https://…daily.co/<room>` URL
+   */
   const createRoom = async (contactName: string): Promise<string> => {
     try {
       setCallStatus({ state: 'creating', message: 'Creating room...' });
@@ -224,6 +307,26 @@ function App() {
       throw new Error(`Failed to create room: ${err.message || 'Unknown error'}`);
     }
   };
+
+/**
+ * Initiates a microphone test by requesting access to the user's microphone,
+ * obtaining an audio stream, and analyzing the microphone input levels.
+ *
+ * The function performs the following steps:
+ * 1. Stops any ongoing microphone test.
+ * 2. Checks for the availability of getUserMedia for microphone access.
+ * 3. Requests access to the microphone and retrieves the audio stream.
+ * 4. Creates an audio context and analyser to process the microphone input.
+ * 5. Monitors the microphone input levels and updates the audio test state.
+ *
+ * If successful, the microphone level is continuously analyzed, and the
+ * microphone test state is updated accordingly. In case of failure, an error
+ * message is logged, and the audio test state is updated to indicate the test
+ * has stopped.
+ *
+ * @throws Will throw an error if getUserMedia is not supported or if microphone
+ *         access fails.
+ */
 
   const startMicTest = async () => {
     try {
@@ -287,6 +390,12 @@ function App() {
       // Monitor microphone level
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       
+/**
+ * Periodically updates the microphone level and checks if it's above the threshold.
+ * The update frequency is capped at the frame rate of the browser.
+ *
+ * @returns {void}
+ */
       const updateMicLevel = () => {
         if (!analyserRef.current || !micStreamRef.current) {
           console.log('Audio analysis stopped');
@@ -333,6 +442,12 @@ function App() {
     }
   };
   
+/**
+ * Stops the microphone test by updating the audio test state,
+ * stopping any active microphone tracks, and closing the audio
+ * context. Resets relevant references to null to clean up resources.
+ */
+
   const stopMicTest = () => {
     console.log('Stopping microphone test');
     setAudioTest(prev => ({ ...prev, isTestingMic: false, micLevel: 0 }));
@@ -352,6 +467,18 @@ function App() {
     analyserRef.current = null;
   };
   
+/**
+ * Tests audio playback by playing a sequence of tones through the
+ * user's default speakers. If the test is successful, the result is
+ * set to 'success' and reset to 'none' after 3 seconds.
+ *
+ * If the test fails, the result is set to 'failed' and an error
+ * message is displayed to the user. The result is reset to 'none'
+ * after 3 seconds.
+ *
+ * @return {Promise<void>}
+ */
+
   const testAudioPlayback = async () => {
     try {
       console.log('Starting audio playback test...');
@@ -418,6 +545,12 @@ function App() {
     }
   };
   
+/**
+ * Stops both microphone and audio playback tests by resetting the audio test state
+ * to its initial values. This includes setting flags for testing states to false,
+ * resetting microphone level and test result, and setting speaker volume to default.
+ */
+
   const stopAudioTest = () => {
     stopMicTest();
     setAudioTest({
@@ -430,6 +563,13 @@ function App() {
     });
   };
 
+/**
+ * Checks if a given URL is a valid Daily.co room URL by verifying the hostname
+ * is either "daily.co" or "daily". If the URL is invalid, returns false.
+ *
+ * @param {string} url - The URL to validate
+ * @returns {boolean} - True if the URL is valid, false otherwise
+ */
   const validateRoomUrl = (url: string): boolean => {
     try {
       const urlObj = new URL(url);
@@ -439,6 +579,12 @@ function App() {
     }
   };
 
+/**
+ * Starts a new call by creating a room via the Daily API and joining the room
+ * with the user's selected audio devices. If the contact name is empty, displays
+ * an error message and returns. If the room creation or joining fails, logs the
+ * error and displays an error message.
+ */
   const startCall = async () => {
     if (!contactName.trim()) {
       setError('Please enter a contact name');
@@ -462,6 +608,14 @@ function App() {
     }
   };
 
+/**
+ * Joins a Daily.co call by creating a call object and joining the meeting with
+ * the user's selected audio devices. If the room creation or joining fails, logs
+ * the error and displays an error message.
+ *
+ * @param {string} [urlToJoin] - Optional room URL to join. If not provided, the
+ * value of `roomUrl` is used.
+ */
   const joinCall = async (urlToJoin?: string) => {
     const targetUrl = urlToJoin || roomUrl;
     
@@ -536,12 +690,28 @@ if (!scamSocketRef.current) {
   const ws = openScamWs();                     // native WS
   scamSocketRef.current = ws;
 
+      /**
+       * On WebSocket connection open:
+       *   1. Log successful connection.
+       *   2. Request microphone access and start recording audio to send to
+       *      the scam-detection WebSocket once the user grants permission.
+       *   3. Handle any errors requesting or accessing the microphone.
+       */
   ws.onopen = () => {
   console.log("🟢  Scam WS connected");
   navigator.mediaDevices.getUserMedia({ audio: true, video: false })
     .then(micStream => startRecorder(micStream, ws))
     .catch(err => console.error("Could not get mic for scam‑guard:", err));
   };
+  /**
+   * Handle incoming WebSocket messages from the scam-detection backend.
+   *
+   * Message types:
+   *   - "score": contains the latest Whisper transcription text and its
+   *     associated scam score (range: 0…1).
+   *   - "scam_detected": indicates that the cumulative scam score has
+   *     exceeded the threshold; the call will automatically end.
+   */
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data) as ScoreMsg | ScamMsg;
     if (msg.type === "score") {
@@ -771,6 +941,17 @@ if (!scamSocketRef.current) {
     }
   };
 
+/**
+ * Handles leaving an ongoing call.
+ *
+ * - Stops and clears the audio recorder if active.
+ * - Disconnects from the scam detection WebSocket if connected.
+ * - Updates the call status to indicate the disconnection process.
+ * - Leaves and destroys the current call session using the Daily API.
+ * - Resets UI state to reflect that the user is no longer in a call.
+ * - Logs and sets an error message if the process fails.
+ */
+
   const leaveCall = async () => {
     if (recorderRef.current) {
       recorderRef.current.stop();
@@ -799,6 +980,14 @@ if (!scamSocketRef.current) {
     }
   };
 
+  /**
+   * Toggles the local user's audio on/off.
+   *
+   * - Checks if the user is currently in a call.
+   * - If so, toggles the user's local audio on/off using the Daily API.
+   * - Updates UI state to reflect the new audio state.
+   * - Logs and sets an error message if the process fails.
+   */
   const toggleAudio = async () => {
     if (!callObjectRef.current) return;
 
@@ -814,6 +1003,14 @@ if (!scamSocketRef.current) {
     }
   };
 
+  /**
+   * Copies the current room URL to the user's clipboard.
+   *
+   * - Checks if a room URL is available.
+   * - If so, uses the `navigator.clipboard` API to copy the URL to the clipboard.
+   * - Updates UI state to reflect the copying success.
+   * - Logs and sets an error message if the process fails.
+   */
   const copyRoomUrl = async () => {
     if (!roomInfo?.url) return;
     
@@ -826,6 +1023,15 @@ if (!scamSocketRef.current) {
     }
   };
 
+  /**
+   * Opens the user's default email client with a pre-filled email invitation
+   * to join the current call.
+   *
+   * - Checks if a room URL and name are available.
+   * - If so, uses the `mailto:` protocol to open the email client with a
+   *   pre-filled subject and body containing the room URL.
+   * - Does nothing if either the room URL or name is not available.
+   */
   const shareViaEmail = () => {
     if (!roomInfo?.url || !roomInfo?.name) return;
     
@@ -837,6 +1043,14 @@ if (!scamSocketRef.current) {
     window.open(`mailto:?subject=${subject}&body=${body}`, '_blank');
   };
 
+/**
+ * Opens the WhatsApp web client to share an invitation message for the current call.
+ *
+ * - Checks if a room URL and name are available.
+ * - If so, constructs a message containing the room URL and opens WhatsApp with the message.
+ * - Does nothing if either the room URL or name is not available.
+ */
+
   const shareViaWhatsApp = () => {
     if (!roomInfo?.url || !roomInfo?.name) return;
     
@@ -846,6 +1060,17 @@ if (!scamSocketRef.current) {
     
     window.open(`https://wa.me/?text=${message}`, '_blank');
   };
+
+/**
+ * Returns the CSS class string for styling a call status indicator based on the call state.
+ *
+ * @param state  The current state of the call lifecycle.
+ * @returns      A string of CSS classes that corresponds to the visual representation of the state.
+ *               - 'joined': green background for an active call.
+ *               - 'joining', 'leaving', 'creating': yellow background for transitional states.
+ *               - 'error': red background for error states.
+ *               - default: gray background for any unknown states.
+ */
 
   const getStatusColor = (state: CallState): string => {
     switch (state) {
