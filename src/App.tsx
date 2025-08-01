@@ -1060,7 +1060,7 @@ if (!scamSocketRef.current) {
     
     window.open(`https://wa.me/?text=${message}`, '_blank');
   };
-
+// docs
 /**
  * Returns the CSS class string for styling a call status indicator based on the call state.
  *
